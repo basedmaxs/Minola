@@ -1,0 +1,110 @@
+name: Render Pak Hendra (20x Parallel)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract Project ZIP
+        run: |
+          for z in *.zip; do unzip -o "$z"; done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright & Chromium
+        run: |
+          npm init -y
+          npm install playwright@1.63.0
+          npx playwright install --with-deps chromium
+
+      - name: Render Frames (Worker ${{ matrix.worker }})
+        run: |
+          python3 - << 'EOF'
+          import os, math, subprocess
+          from concurrent.futures import ThreadPoolExecutor
+
+          TOTAL = 1478
+          WORKERS = 20
+          W_ID = int("${{ matrix.worker }}")
+
+          per_worker = math.ceil(TOTAL / WORKERS)
+          start = W_ID * per_worker
+          end = min(start + per_worker - 1, TOTAL - 1)
+
+          if start <= end:
+              cpus = os.cpu_count() or 4
+              sub_size = math.ceil((end - start + 1) / cpus)
+              chunks = [(a, min(a + sub_size - 1, end)) for a in range(start, end + 1, sub_size)]
+              env = dict(os.environ, MODE="cpu", RESUME="1")
+
+              def run_chunk(c):
+                  print(f"Worker {W_ID}: rendering {c[0]}-{c[1]}", flush=True)
+                  subprocess.run(f'node render2.mjs frames "{c[0]}-{c[1]}"', shell=True, check=True, env=env)
+
+              with ThreadPoolExecutor(len(chunks)) as ex:
+                  list(ex.map(run_chunk, chunks))
+          EOF
+
+      - name: Upload Frames
+        uses: actions/upload-artifact@v4
+        with:
+          name: frames-worker-${{ matrix.worker }}
+          path: frames/*.jpg
+          retention-days: 1
+
+  encode:
+    needs: render
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract Project ZIP
+        run: |
+          for z in *.zip; do unzip -o "$z"; done
+
+      - name: Download All Frames
+        uses: actions/download-artifact@v4
+        with:
+          pattern: frames-worker-*
+          merge-multiple: true
+          path: frames
+
+      - name: Install FFmpeg & Fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Generate Subtitles & Encode MP4
+        run: |
+          python3 make_subs.py work/words.json subs.ass subs.srt
+          if [ -f "mix_final.wav" ]; then
+            ffmpeg -v error -y -framerate 30 -i frames/f%04d.jpg -i mix_final.wav \
+              -vf "ass=subs.ass" -map 0:v:0 -map 1:a:0 -c:a aac -b:a 192k -shortest \
+              -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p -movflags +faststart \
+              "Pak-Hendra-dan-Es-Krim.mp4"
+          else
+            ffmpeg -v error -y -framerate 30 -i frames/f%04d.jpg \
+              -vf "ass=subs.ass" -an \
+              -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p -movflags +faststart \
+              "Pak-Hendra-dan-Es-Krim.mp4"
+          fi
+
+      - name: Upload Final Video
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pak-Hendra-dan-Es-Krim
+          path: |
+            Pak-Hendra-dan-Es-Krim.mp4
+            subs.srt
